@@ -3,6 +3,10 @@
 namespace App\Providers;
 
 use Illuminate\Support\ServiceProvider;
+use App\Interfaces\JudgmentRepositoryInterface;
+use App\Interfaces\SearchRepositoryInterface;
+use App\Repositories\JudgmentRepository;
+use App\Repositories\SearchRepository;
 
 class AppServiceProvider extends ServiceProvider
 {
@@ -11,10 +15,8 @@ class AppServiceProvider extends ServiceProvider
      */
     public function register(): void
     {
-        $this->app->bind(
-        SearchRepositoryInterface::class,
-        SearchRepository::class,
-    );
+        $this->app->bind(SearchRepositoryInterface::class,SearchRepository::class,);
+        $this->app->bind(JudgmentRepositoryInterface::class, JudgmentRepository::class);
     }
 
     /**
