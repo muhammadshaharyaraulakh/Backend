@@ -5,7 +5,6 @@ namespace App\Services;
 use App\DTOs\JudgmentDTO;
 use App\Interfaces\JudgmentRepositoryInterface;
 use App\Models\IngestionLog;
-use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
 class IngestionService
@@ -13,9 +12,10 @@ class IngestionService
     public function __construct(
         private readonly JudgmentRepositoryInterface $repository,
         private readonly EmbeddingService $embeddingService,
+        private readonly McpService $mcpService,
     ) {}
 
-    public function ingest(int $limit = 100): IngestionLog
+    public function ingest(int $limit = 50): IngestionLog
     {
         $log = IngestionLog::create([
             'status'     => 'running',
@@ -23,11 +23,13 @@ class IngestionService
         ]);
 
         try {
-            $judgments = $this->fetchFromMcp($limit);
-            $log->update(['fetched' => count($judgments)]);
+            $this->mcpService->initialize();
 
-            foreach ($judgments as $judgment) {
-                $this->processJudgment($judgment, $log);
+            $cases = $this->mcpService->searchJudgments($limit);
+            $log->update(['fetched' => count($cases)]);
+
+            foreach ($cases as $case) {
+                $this->processCase($case, $log);
             }
 
             $log->update([
@@ -41,45 +43,36 @@ class IngestionService
                 'error_message' => $e->getMessage(),
                 'completed_at'  => now(),
             ]);
-
             Log::error('Ingestion failed', ['error' => $e->getMessage()]);
         }
 
         return $log;
     }
 
-    private function fetchFromMcp(int $limit): array
+    private function processCase(array $case, IngestionLog $log): void
     {
-        $response = Http::post('https://pakistancaselaw.com/mcp', [
-            'jsonrpc' => '2.0',
-            'method'  => 'tools/call',
-            'id'      => 1,
-            'params'  => [
-                'name'      => 'search_judgments',
-                'arguments' => ['limit' => $limit],
-            ],
-        ]);
-
-        return $response->json('result.judgments', []);
-    }
-
-    private function processJudgment(array $data, IngestionLog $log): void
-    {
-        if ($this->repository->existsByCitation($data['citation'])) {
+        if ($this->repository->existsByCitation($case['citation'])) {
             $log->increment('skipped');
             return;
         }
 
         try {
+            $fullCase = $this->mcpService->getFullCase($case['id']);
+
+            if (empty($fullCase['body'])) {
+                $log->increment('skipped');
+                return;
+            }
+
             $dto = new JudgmentDTO(
-                citation:       $data['citation'],
-                title:          $data['title'],
-                courtShortName: $data['court'],
-                year:           $data['year'],
-                fullText:       $data['full_text'],
-                subject:        $data['subject'] ?? null,
-                judges:         $data['judges']  ?? null,
-                sourceUrl:      $data['source_url'] ?? null,
+                citation:       $fullCase['citation'],
+                title:          $fullCase['title'],
+                courtShortName: $this->mapCourt($fullCase['court'] ?? ''),
+                year:           (int) $fullCase['year'],
+                fullText:       $fullCase['body'],
+                subject:        $fullCase['subject'] ?? null,
+                judges:         isset($fullCase['author']) ? [$fullCase['author']] : null,
+                sourceUrl:      $fullCase['url'] ?? null,
             );
 
             $embedding = $this->embeddingService->embed(
@@ -91,10 +84,24 @@ class IngestionService
 
         } catch (\Throwable $e) {
             $log->increment('failed');
-            Log::warning('Judgment failed', [
-                'citation' => $data['citation'] ?? 'unknown',
-                'error'    => $e->getMessage(),
+            Log::warning('Case failed', [
+                'id'    => $case['id'] ?? '?',
+                'error' => $e->getMessage(),
             ]);
         }
+    }
+
+    private function mapCourt(string $name): string
+    {
+        return match(true) {
+            str_contains($name, 'Supreme')     => 'SC',
+            str_contains($name, 'Lahore')      => 'LHC',
+            str_contains($name, 'Sindh')       => 'SHC',
+            str_contains($name, 'Peshawar')    => 'PHC',
+            str_contains($name, 'Islamabad')   => 'IHC',
+            str_contains($name, 'Balochistan') => 'BHC',
+            str_contains($name, 'Shariat')     => 'FSC',
+            default                            => 'SC',
+        };
     }
 }
